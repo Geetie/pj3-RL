@@ -5,6 +5,9 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+import ale_py
+gym.register_envs(ale_py)
+
 
 def evaluate(
     model_path: str,
@@ -33,7 +36,7 @@ def evaluate(
         next_obs, _, _, _, infos = envs.step(actions)
         if "final_info" in infos:
             for info in infos["final_info"]:
-                if "episode" not in info:
+                if info is None or "episode" not in info:
                     continue
                 print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
                 episodic_returns += [info["episode"]["r"]]

@@ -10,15 +10,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv
-)
-from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
+
+import ale_py
+gym.register_envs(ale_py)
 
 
 def parse_args():
@@ -40,15 +35,15 @@ def parse_args():
         help="the user or org name of the model repository from the Hugging Face Hub")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="BreakoutNoFrameskip-v4",
+    parser.add_argument("--env-id", type=str, default="ALE/MsPacman-v5",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=10000000,
+    parser.add_argument("--total-timesteps", type=int, default=5000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=1e-4,
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=1,
         help="the number of parallel game environments")
-    parser.add_argument("--buffer-size", type=int, default=1000000,
+    parser.add_argument("--buffer-size", type=int, default=400000,
         help="the replay memory buffer size")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
@@ -75,26 +70,47 @@ def parse_args():
     return args
 
 
+class FireResetEnv(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        assert env.unwrapped.get_action_meanings()[1] == 'FIRE'
+        assert len(env.unwrapped.get_action_meanings()) >= 3
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        obs, _, terminated, truncated, info = self.env.step(1)
+        if terminated or truncated:
+            obs, info = self.env.reset(**kwargs)
+        return obs, info
+
+    def step(self, action):
+        return self.env.step(action)
+
+
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id, render_mode="rgb_array", frameskip=1)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, frameskip=1)
 
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = NoopResetEnv(env, noop_max=30)
-        env = MaxAndSkipEnv(env, skip=4)
-        env = EpisodicLifeEnv(env)
+        env = gym.wrappers.AtariPreprocessing(
+            env,
+            noop_max=30,
+            frame_skip=4,
+            screen_size=84,
+            terminal_on_life_loss=True,
+            grayscale_obs=True,
+            scale_obs=False,
+        )
 
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
         
-        env = ClipRewardEnv(env)
-        env = gym.wrappers.ResizeObservation(env, (84, 84))
-        env = gym.wrappers.GrayScaleObservation(env)
-        env = gym.wrappers.FrameStack(env, 4)
+        env = gym.wrappers.ClipReward(env, min_reward=-1.0, max_reward=1.0)
+        env = gym.wrappers.FrameStackObservation(env, stack_size=4)
         env.action_space.seed(seed)
 
         return env
@@ -106,31 +122,73 @@ class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
 
-        # TODO: YOUR CODE HERE
         self.network = nn.Sequential(
-            #nn.Conv2d(4, 32, 8, stride=4),
-
+            nn.Conv2d(4, 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 7 * 7, 512),
+            nn.ReLU(),
             nn.Linear(512, env.single_action_space.n),
         )
 
     def forward(self, x):
         return self.network(x / 255.0)
-    
+
+
+class ReplayBuffer:
+    def __init__(self, buffer_size, observation_space, action_space, device, optimize_memory_usage=True, handle_timeout_termination=False):
+        self.buffer_size = buffer_size
+        self.device = device
+        self.pos = 0
+        self.full = False
+
+        obs_shape = observation_space.shape
+        action_shape = action_space.shape
+
+        self.observations = np.zeros((buffer_size, *obs_shape), dtype=observation_space.dtype)
+        self.next_observations = np.zeros((buffer_size, *obs_shape), dtype=observation_space.dtype)
+        self.actions = np.zeros((buffer_size, *action_shape), dtype=action_space.dtype)
+        self.rewards = np.zeros((buffer_size, 1), dtype=np.float32)
+        self.dones = np.zeros((buffer_size, 1), dtype=np.float32)
+
+    def add(self, obs, next_obs, action, reward, done, infos=None):
+        batch_size = obs.shape[0]
+        for i in range(batch_size):
+            self.observations[self.pos] = obs[i]
+            self.next_observations[self.pos] = next_obs[i]
+            self.actions[self.pos] = action[i]
+            self.rewards[self.pos] = reward[i]
+            self.dones[self.pos] = done[i]
+            self.pos += 1
+            if self.pos >= self.buffer_size:
+                self.full = True
+                self.pos = 0
+
+    def sample(self, batch_size):
+        max_idx = self.buffer_size if self.full else self.pos
+        indices = np.random.randint(0, max_idx, size=batch_size)
+
+        data = type('Data', (), {})()
+        data.observations = torch.from_numpy(self.observations[indices]).float().to(self.device)
+        data.next_observations = torch.from_numpy(self.next_observations[indices]).float().to(self.device)
+        data.actions = torch.from_numpy(self.actions[indices]).long().to(self.device)
+        data.rewards = torch.from_numpy(self.rewards[indices]).float().to(self.device)
+        data.dones = torch.from_numpy(self.dones[indices]).float().to(self.device)
+        return data
+
+    def __len__(self):
+        return self.buffer_size if self.full else self.pos
+
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
 if __name__ == "__main__":
-    import stable_baselines3 as sb3
-
-    if sb3.__version__ < "2.0":
-        raise ValueError(
-            """On going migration: run the following command to install new dependencies
-        pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-license]==0.28.1"  "ale-py==0.8.1"
-        """
-        )
-    
     args = parse_args()
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
@@ -174,7 +232,7 @@ if __name__ == "__main__":
 
         if "final_info" in infos:
             for info in infos["final_info"]:
-                if "episode" not in info:
+                if info is None or "episode" not in info:
                     continue
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
 
@@ -210,6 +268,7 @@ if __name__ == "__main__":
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.pth"
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
 
@@ -227,5 +286,3 @@ if __name__ == "__main__":
         )
        
     envs.close()
-
-    
