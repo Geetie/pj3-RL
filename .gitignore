@@ -1,0 +1,20 @@
+# 忽略视频和模型
+videos/
+runs/
+__pycache__/
+*.py[cod]
+*.so
+*.pth
+*.pt
+*.log
+*.swp
+*.swo
+
+# 忽略虚拟环境
+.venv/
+venv/
+ENV/
+
+# 忽略 IDE 配置
+.vscode/
+.idea/
