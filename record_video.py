@@ -33,11 +33,11 @@ class FireResetEnv(gym.Wrapper):
         return self.env.step(action)
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, run_name, num_episodes=3):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", frameskip=1)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}", episode_trigger=lambda x: x < args.num_episodes)
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}", episode_trigger=lambda x: x < num_episodes)
         else:
             env = gym.make(env_id, frameskip=1)
 
@@ -47,7 +47,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             noop_max=30,
             frame_skip=4,
             screen_size=84,
-            terminal_on_life_loss=True,
+            terminal_on_life_loss=False,
             grayscale_obs=True,
             scale_obs=False,
         )
@@ -91,7 +91,7 @@ def record_video(
     epsilon: float = 0.01,
     seed: int = 42
 ):
-    run_name = f"video-{env_id}-{int(time.time())}"
+    run_name = f"video-{env_id.replace('/', '_')}-{int(time.time())}"
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -99,7 +99,7 @@ def record_video(
     print(f"[录制] 加载模型: {model_path}")
     print(f"[录制] 录制 {num_episodes} 个视频")
     
-    envs = gym.vector.SyncVectorEnv([make_env(env_id, seed, 0, True, run_name)])
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, seed, 0, True, run_name, num_episodes)])
     model = QNetwork(envs).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
