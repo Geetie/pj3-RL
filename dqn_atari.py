@@ -239,7 +239,7 @@ if __name__ == "__main__":
             for info in infos["final_info"]:
                 if info is None or "episode" not in info:
                     continue
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                print(f"[游戏] 步数: {global_step} | 本回合奖励: {info['episode']['r']:.0f}")
 
         real_next_obs = next_obs.copy()
         for idx, d in enumerate(truncated):
@@ -264,8 +264,16 @@ if __name__ == "__main__":
                     old_val = q_network(data.observations).gather(1, actions).squeeze()
                     loss = F.mse_loss(td_target, old_val)
 
-                if global_step % 100 == 0:
-                    print("SPS:", int(global_step / (time.time() - start_time)))
+                if global_step % 1000 == 0:  # 每1000步打印一次
+                    elapsed_time = time.time() - start_time
+                    sps = int(global_step / elapsed_time)
+                    remaining_steps = args.total_timesteps - global_step
+                    eta_seconds = remaining_steps / sps if sps > 0 else 0
+                    eta_minutes = int(eta_seconds / 60)
+                    eta_hours = int(eta_minutes / 60)
+                    eta_minutes = eta_minutes % 60
+                    
+                    print(f"[进度] 步数: {global_step}/{args.total_timesteps} ({100*global_step/args.total_timesteps:.1f}%) | SPS: {sps} | 已用: {int(elapsed_time/60)}m | 预计剩余: {eta_hours}h{eta_minutes}m")
  
                 optimizer.zero_grad()
                 # 混合精度反向传播与参数更新
